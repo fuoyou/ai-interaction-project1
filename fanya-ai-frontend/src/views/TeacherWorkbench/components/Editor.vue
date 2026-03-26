@@ -122,7 +122,7 @@
           </div>
           <div v-else-if="!localCategoryKnowledge || localCategoryKnowledge.length === 0" class="kb-empty">
             <el-empty description="该分类暂无知识库资料" :image-size="60" />
-            <p class="kb-tip">请在主页的分类中上传知识库资料，上传后AI将自动构建RAG索引</p>
+            <p class="kb-tip">在主页该课程下上传的补充资料与学生端「我的知识库」同一列表、共用检索；上传后服务端会自动构建索引。</p>
           </div>
           <div v-else class="kb-content">
             <div class="kb-header">
@@ -137,7 +137,7 @@
                 <span class="kb-selected-count">已选 {{ selectedKnowledge.length }} 个</span>
               </div>
             </div>
-            <p class="kb-desc">勾选要结合的知识库资料，AI 将参考这些内容生成讲稿和测验题</p>
+            <p class="kb-desc">勾选要结合的资料（与学生端该课程知识库同源），AI 将参考这些内容生成讲稿和测验题</p>
             <div class="kb-list">
               <div
                 v-for="doc in localCategoryKnowledge"

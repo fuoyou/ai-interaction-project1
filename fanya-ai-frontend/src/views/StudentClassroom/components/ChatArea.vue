@@ -27,6 +27,9 @@
         <div class="msg-content-wrapper" @mouseup="handleChatTextSelection($event, msg)">
           <!-- 普通文本消息 -->
           <div v-if="msg.type !== 'supplement'" class="bubble">
+            <div v-if="msg.role === 'ai' && msg.visionModel" class="vision-model-tag">
+              通义千问视觉 · {{ msg.visionModel }}
+            </div>
             <div v-html="formatMarkdown(msg.content)"></div>
             <!-- 【新增】如果消息来自文本选中，显示跳转按钮 -->
             <div v-if="msg.role === 'ai' && msg.sourcePage" class="jump-to-page">
@@ -38,6 +41,26 @@
               >
                 <el-icon><Position /></el-icon> 跳转到第 {{ msg.sourcePage }} 页
               </el-button>
+            </div>
+            <div v-if="msg.role === 'ai' && (msg.coursewareCitations?.length || msg.knowledgeCitations?.length)" class="citation-chips" aria-label="回答溯源标记">
+              <span v-if="msg.coursewareCitations?.length" class="citation-chips-label">课件</span>
+              <button
+                v-for="c in msg.coursewareCitations"
+                :key="'cw-' + c.ref"
+                type="button"
+                class="citation-chip citation-chip--cw"
+                :title="(c.sourceName || '') + '，点击查看原文片段'"
+                @click.stop="openCitationDetail(c, 'cw')"
+              >[片段{{ c.ref }}]</button>
+              <span v-if="msg.knowledgeCitations?.length" class="citation-chips-label">知识库</span>
+              <button
+                v-for="c in msg.knowledgeCitations"
+                :key="'kb-' + (c.docId || c.ref)"
+                type="button"
+                class="citation-chip citation-chip--kb"
+                :title="(c.sourceName || '') + '，点击查看原文片段'"
+                @click.stop="openCitationDetail(c, 'kb')"
+              >[资料{{ c.ref }}]</button>
             </div>
           </div>
           
@@ -84,6 +107,25 @@
       </div>
 
     </div>
+
+    <el-dialog
+      v-model="citationDialogVisible"
+      :title="citationDialogTitle"
+      width="min(560px, 94vw)"
+      align-center
+      destroy-on-close
+      class="citation-detail-dialog"
+      append-to-body
+    >
+      <div class="citation-dialog-source">
+        <span class="citation-dialog-source-label">来源</span>
+        <span class="citation-dialog-source-name">{{ citationDialogSourceName }}</span>
+      </div>
+      <div class="citation-dialog-snippet-wrap">
+        <div class="citation-dialog-snippet-label">引用片段</div>
+        <div class="citation-dialog-snippet">{{ citationDialogSnippet }}</div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -120,6 +162,23 @@ const showLoadingAvatar = computed(() => {
 
 const displayContent = ref('')
 const scrollRef = ref(null)
+
+const citationDialogVisible = ref(false)
+const citationDialogTitle = ref('')
+const citationDialogSourceName = ref('')
+const citationDialogSnippet = ref('')
+
+const openCitationDetail = (c, kind) => {
+  const isKb = kind === 'kb'
+  const refLabel = isKb ? `资料${c?.ref}` : `片段${c?.ref}`
+  const typeLabel = isKb ? '课程知识库' : '课件检索'
+  citationDialogTitle.value = `[${refLabel}] · ${typeLabel}`
+  citationDialogSourceName.value = (c?.sourceName || '').trim() || '—'
+  const snip = (c?.snippet || '').trim()
+  citationDialogSnippet.value = snip || '暂无片段正文，请结合课件或知识库原文核对。'
+  citationDialogVisible.value = true
+}
+
 let typeTimer = null
 let currentAudio = null
 const emit = defineEmits(['resolve', 'speakContent', 'jumpToPage', 'chatTextSelected'])
@@ -625,6 +684,108 @@ onUnmounted(() => {
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--light-blue);
+}
+
+.vision-model-tag {
+  font-size: 11px;
+  color: var(--primary-blue);
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding: 4px 10px;
+  background: rgba(48, 122, 227, 0.08);
+  border-radius: 8px;
+  display: inline-block;
+}
+/* 溯源：仅冒泡标记，正文不展开 */
+.citation-chips {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  text-align: left;
+}
+.citation-chips-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-sub);
+  margin-right: 2px;
+}
+.citation-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  line-height: 1.2;
+  cursor: pointer;
+  border: 1px solid transparent;
+  font-family: inherit;
+  margin: 0;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.citation-chip:focus-visible {
+  outline: 2px solid var(--primary-blue);
+  outline-offset: 2px;
+}
+.citation-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(48, 122, 227, 0.15);
+}
+.citation-chip--cw {
+  color: var(--dark-blue);
+  background: rgba(48, 122, 227, 0.1);
+  border-color: rgba(48, 122, 227, 0.25);
+}
+.citation-chip--kb {
+  color: #15803d;
+  background: rgba(20, 120, 80, 0.1);
+  border-color: rgba(20, 120, 80, 0.22);
+}
+.citation-chip--kb:hover {
+  box-shadow: 0 2px 8px rgba(20, 120, 80, 0.12);
+}
+
+.citation-dialog-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--light-blue, #D2E6FE);
+}
+.citation-dialog-source-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-sub, #64748B);
+  flex-shrink: 0;
+}
+.citation-dialog-source-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main, #1E293B);
+  word-break: break-word;
+}
+.citation-dialog-snippet-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-sub, #64748B);
+  margin-bottom: 8px;
+}
+.citation-dialog-snippet {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text-main, #1E293B);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: min(50vh, 360px);
+  overflow-y: auto;
+  padding: 12px 14px;
+  background: #F8FAFC;
+  border-radius: 12px;
+  border: 1px solid rgba(48, 122, 227, 0.12);
 }
 
 /* 加载中动画样式 */

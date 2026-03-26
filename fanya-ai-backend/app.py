@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 from config import Config
 from extensions import db, jwt
 from routes import register_routes
@@ -21,6 +22,17 @@ jwt.init_app(app)
 register_routes(app)
 
 # ==================== 错误处理器 ====================
+# 404/405 等 HTTP 异常必须先于 Exception 注册，否则会被下面「兜底」成 500，
+# 前端只看到「服务器错误: 404 Not Found...」，无法区分是路由不存在还是真 500。
+@app.errorhandler(HTTPException)
+def handle_http_exception(e):
+    desc = (e.description or str(e) or "").strip()
+    return jsonify({
+        "code": e.code,
+        "msg": desc or f"HTTP {e.code}",
+        "data": {"path": request.path, "method": request.method}
+    }), e.code
+
 # 保留了第一份代码中详细的带分隔符的日志输出，方便在控制台调试排错
 @app.errorhandler(500)
 def internal_error(error):
@@ -37,6 +49,8 @@ def internal_error(error):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    if isinstance(e, HTTPException):
+        return handle_http_exception(e)
     print("=" * 60)
     print("未捕获的异常:")
     print("=" * 60)
@@ -81,6 +95,7 @@ with app.app_context():
         ("ALTER TABLE biz_knowledge_doc MODIFY COLUMN id INT NOT NULL AUTO_INCREMENT", "知识库表修复id自增"),
         ("ALTER TABLE biz_knowledge_doc DROP FOREIGN KEY biz_knowledge_doc_ibfk_1", "删除知识库外键约束"),
         ("ALTER TABLE biz_knowledge_doc CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci", "知识库表转换utf8mb4字符集"),
+        ("ALTER TABLE biz_knowledge_doc ADD COLUMN index_status VARCHAR(20) NULL", "知识库解析状态 index_status"),
         # 智能插旗考点答题记录表
         ("""CREATE TABLE IF NOT EXISTS biz_checkpoint_answer (
             id INT AUTO_INCREMENT PRIMARY KEY,

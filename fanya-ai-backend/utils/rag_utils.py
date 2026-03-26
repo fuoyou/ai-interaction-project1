@@ -1,6 +1,6 @@
 import json
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import jieba
 from rank_bm25 import BM25Okapi
@@ -61,15 +61,20 @@ class RAGRetriever:
         return re.findall(r"[a-zA-Z0-9_]+", text.lower())
 
     def search(self, query: str, top_k: int = 3) -> List[str]:
+        ranked = self.search_with_scores(query, top_k)
+        return [t for t, _ in ranked]
+
+    def search_with_scores(self, query: str, top_k: int = 3) -> List[Tuple[str, float]]:
+        """返回 (片段文本, BM25 分数)，分数越高越相关。思路对齐多文档 RAG 中的 top-k 检索。"""
         if not query or not self._bm25:
             return []
         q_tokens = self._tokenize(query)
         scores = self._bm25.get_scores(q_tokens)
         top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
-        positive_hits = [self.chunks[i] for i in top_idx if scores[i] > 0]
-        if positive_hits:
-            return positive_hits
-        return [self.chunks[i] for i in top_idx]
+        positive = [(self.chunks[i], float(scores[i])) for i in top_idx if scores[i] > 0]
+        if positive:
+            return positive
+        return [(self.chunks[i], float(scores[i])) for i in top_idx]
 
 
 def build_rag_chunks(content_list: List[str], chunk_size: int = 500) -> List[str]:

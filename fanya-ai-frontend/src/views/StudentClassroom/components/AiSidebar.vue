@@ -30,6 +30,20 @@
         </div>
       </div>
       <template v-else>
+        <div v-if="activeTab === 'chat'" class="kb-toggle-row">
+          <el-tooltip
+            placement="bottom-start"
+            :show-after="400"
+          >
+            <template #content>
+              <div class="kb-tip-inner">
+                开启后，除当前页与课件检索外，会额外检索<strong>该课件所属课程分类</strong>下的补充资料。该资料池与教师工作台、学生「我的知识库」中<strong>同一课程</strong>下列表一致，师生共用；课件需归入对应课程（上传时选择课程分类），否则检索可能为空。
+              </div>
+            </template>
+            <span class="kb-toggle-label kb-toggle-label--tip">启用课程知识库</span>
+          </el-tooltip>
+          <el-switch v-model="useCourseKnowledgeBase" size="small" />
+        </div>
         <ChatArea 
           :mode="mode" 
           :script="script" 
@@ -499,8 +513,11 @@ const props = defineProps({
   history: { type: Array, default: () => [] },
   placeholder: { type: String, default: '输入您的问题...' },
   isChatLoading: { type: Boolean, default: false },
-  courseId: { type: [String, Number], default: '' }
+  courseId: { type: [String, Number], default: '' },
+  lessonCategoryId: { type: String, default: '' }
 })
+
+const useCourseKnowledgeBase = ref(false)
 
 // 判断字体颜色（用于导图/图谱）
 const getTextColor = (bgColor) => {
@@ -889,7 +906,13 @@ const generateKnowledgeGraph = async () => {
 }
 
 const onSend = () => {
-  if (inputVal.value.trim()) { emit('sendMessage', inputVal.value); inputVal.value = ''; }
+  const t = inputVal.value.trim()
+  if (!t) return
+  emit('sendMessage', {
+    text: t,
+    useCourseKnowledgeBase: useCourseKnowledgeBase.value
+  })
+  inputVal.value = ''
 }
 
 let svgScale = 1
@@ -1081,6 +1104,21 @@ defineExpose({ resetGraphData, resetQuizData })
   content: ''; position: absolute; bottom: 0; left: 0; width: 100%; height: 3px;
   background: var(--dark-blue);
 }
+
+.kb-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 10px 14px;
+  background: rgba(48, 122, 227, 0.06);
+  border-bottom: 1px solid var(--light-blue);
+  font-size: 13px;
+}
+.kb-toggle-label { font-weight: 600; color: var(--text-main); }
+.kb-toggle-label--tip { cursor: help; border-bottom: 1px dashed rgba(48, 122, 227, 0.45); }
+.kb-tip-inner { max-width: 300px; line-height: 1.55; font-size: 13px; }
+.kb-tip-inner strong { color: var(--dark-blue); }
 
 /* 思维导图/知识图谱容器 */
 .mindmap-container, .knowledge-graph-container {

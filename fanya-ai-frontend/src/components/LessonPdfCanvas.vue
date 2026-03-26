@@ -144,6 +144,50 @@ function onBlockClick(block) {
   emit('block-click', block)
 }
 
+/** 按 Paddle bbox 从当前页 canvas 裁剪配图，供千问视觉 API（JPEG 压缩，最大边约 1024） */
+function cropBlockToDataURL(block) {
+  const el = canvasRef.value
+  if (!el || !block?.bbox || !props.ocrPage?.page_width || !props.ocrPage?.page_height) return null
+  const bbox = block.bbox
+  if (!Array.isArray(bbox) || bbox.length < 4) return null
+  const [x1, y1, x2, y2] = bbox
+  const pw = props.ocrPage.page_width
+  const ph = props.ocrPage.page_height
+  if (!vw.value || !vh.value) return null
+  const sx = vw.value / pw
+  const sy = vh.value / ph
+  const px = Math.max(0, Math.floor(x1 * sx))
+  const py = Math.max(0, Math.floor(y1 * sy))
+  const cw = Math.max(2, Math.ceil((x2 - x1) * sx))
+  const ch = Math.max(2, Math.ceil((y2 - y1) * sy))
+  try {
+    const maxD = 1024
+    /** 通义 VL 要求宽、高均须明显大于 10px，过小会拒识 */
+    const minModel = 12
+    let destW = cw
+    let destH = ch
+    if (destW > maxD || destH > maxD) {
+      const s = Math.min(maxD / destW, maxD / destH, 1)
+      destW = Math.max(2, Math.floor(destW * s))
+      destH = Math.max(2, Math.floor(destH * s))
+    }
+    destW = Math.max(destW, minModel)
+    destH = Math.max(destH, minModel)
+    const out = document.createElement('canvas')
+    out.width = destW
+    out.height = destH
+    const octx = out.getContext('2d')
+    octx.fillStyle = '#ffffff'
+    octx.fillRect(0, 0, destW, destH)
+    octx.drawImage(el, px, py, cw, ch, 0, 0, destW, destH)
+    return out.toDataURL('image/jpeg', 0.8)
+  } catch {
+    return null
+  }
+}
+
+defineExpose({ cropBlockToDataURL })
+
 function blockClass(block) {
   return [
     'block-hit',

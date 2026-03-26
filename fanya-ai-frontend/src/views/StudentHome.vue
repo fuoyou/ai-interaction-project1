@@ -88,8 +88,8 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>
           </button>
           <div class="breadcrumb">
-            <span class="bc-icon">🌊</span>
-            <span class="bc-text">AI智慧课程中心</span>
+            <span class="bc-icon">{{ activeNav === 'knowledge' ? '📚' : '🌊' }}</span>
+            <span class="bc-text">{{ activeNav === 'knowledge' ? '我的知识库' : 'AI智慧课程中心' }}</span>
           </div>
         </div>
         <div class="toolbar-right">
@@ -97,7 +97,7 @@
             <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input
               v-model="searchKeyword"
-              placeholder="搜索课程..."
+              :placeholder="activeNav === 'knowledge' ? '搜索课程以管理知识库…' : '搜索课程...'"
               @focus="searchFocused = true"
               @blur="searchFocused = false"
             />
@@ -107,7 +107,7 @@
             <el-option label="2026年春夏学期" value="2026年春夏学期" />
             <el-option label="2025年秋冬学期" value="2025年秋冬学期" />
           </el-select>
-          <button class="action-btn primary" @click="showCreateCourseDialog = true">
+          <button v-if="activeNav === 'courses'" class="action-btn primary" @click="showCreateCourseDialog = true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             <span class="btn-label">新建课程</span>
           </button>
@@ -115,7 +115,7 @@
       </div>
 
       <!-- 统计卡片 (统一使用品牌四色) -->
-      <div class="stats-row">
+      <div class="stats-row" v-if="activeNav === 'courses'">
         <div class="stat-card" v-for="(s, i) in statsData" :key="i" :style="{ '--delay': i * 0.1 + 's' }">
           <div class="stat-icon" :class="s.colorClass">
             <component :is="s.icon" class="s-icon" />
@@ -128,7 +128,7 @@
       </div>
 
       <!-- 课程网格 -->
-      <div class="content-scroll">
+      <div class="content-scroll" v-if="activeNav === 'courses'">
         <div v-if="loadingCourses" class="state-empty">
           <div class="loader"></div>
           <p>海浪正在推卷课程数据...</p>
@@ -171,6 +171,84 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- 我的知识库（独立页：左侧选课程，右侧管理资料） -->
+      <div class="content-scroll kb-page-wrap" v-else-if="activeNav === 'knowledge'">
+        <div v-if="loadingCourses" class="state-empty">
+          <div class="loader"></div>
+          <p>加载课程列表...</p>
+        </div>
+        <template v-else>
+          <p class="kb-page-lead">同一门课程（同一课程分类）下，<strong>教师端与学生端共用一套补充资料</strong>：任一方上传的资料，另一方在选中该课程后都能看到；在「互动答疑」中开启「启用课程知识库」后，AI 会检索本分类下全部资料并支持溯源。</p>
+          <div v-if="filteredCourses.length === 0" class="state-empty kb-page-empty">
+            <div class="empty-art">📭</div>
+            <p>暂无课程，请先在「我的课程库」中新建课程</p>
+          </div>
+          <div v-else class="kb-page-layout">
+            <aside class="kb-page-courses">
+              <div class="kb-page-aside-title">选择课程</div>
+              <button
+                v-for="c in filteredCourses"
+                :key="c.id"
+                type="button"
+                :class="['kb-page-course-btn', { active: kbTargetCourse?.id === c.id }]"
+                @click="selectKbCourse(c)"
+              >
+                <span class="kb-page-course-name">{{ c.name }}</span>
+                <span class="kb-page-course-meta">{{ c.coursewares?.length || 0 }} 份课件</span>
+              </button>
+            </aside>
+            <section class="kb-page-panel kb-page-panel--glass" v-if="kbTargetCourse">
+              <div class="kb-page-panel-head">
+                <div class="kb-page-panel-title-wrap">
+                  <h2 class="kb-page-panel-title">{{ kbTargetCourse.name }}</h2>
+                  <p class="kb-page-panel-sub">共 {{ kbDocs.length }} 份资料 · 点击标题可预览原文</p>
+                </div>
+                <el-button type="primary" size="small" class="upload-trigger" @click="openKbUploadDialog">
+                  <el-icon><Upload /></el-icon> 添加资料
+                </el-button>
+              </div>
+              <div class="kb-list kb-page-doc-list" v-loading="kbLoading">
+                <div v-if="!kbDocs.length" class="cw-empty kb-empty">暂无补充资料，可上传 PDF / Word / TXT</div>
+                <div
+                  v-for="doc in kbDocs"
+                  :key="doc.id"
+                  class="kb-item"
+                  :class="{ 'kb-item--processing': kbDocStatus(doc) === 'processing' }"
+                >
+                  <div class="kb-icon-wrap" aria-hidden="true">
+                    <span class="kb-icon">{{ doc.fileType === 'pdf' ? '📕' : doc.fileType === 'txt' ? '📝' : '📘' }}</span>
+                  </div>
+                  <div class="kb-info">
+                    <button type="button" class="kb-name-btn" @click="openKbDoc(doc)">
+                      <span class="kb-name">{{ doc.name }}</span>
+                      <span class="kb-open-hint">预览</span>
+                    </button>
+                    <div class="kb-meta">
+                      {{ doc.fileType?.toUpperCase() || '—' }} · {{ kbStatusLabel(doc) }} · {{ doc.createTime }}
+                    </div>
+                    <div v-if="kbDocStatus(doc) === 'processing'" class="kb-progress-block">
+                      <el-progress :indeterminate="true" :duration="2.5" :stroke-width="5" :show-text="false" />
+                      <span class="kb-progress-text">正在解析与建索引，请稍候…</span>
+                    </div>
+                  </div>
+                  <el-button
+                    v-if="doc.canDelete"
+                    type="danger"
+                    link
+                    size="small"
+                    class="kb-del"
+                    @click.stop="removeKbDoc(doc)"
+                  >删除</el-button>
+                </div>
+              </div>
+            </section>
+            <section class="kb-page-panel kb-page-panel--empty" v-else>
+              <p>请从左侧选择一门课程</p>
+            </section>
+          </div>
+        </template>
       </div>
     </main>
 
@@ -226,6 +304,29 @@
       </template>
     </el-dialog>
 
+    <!-- 知识库资料上传 -->
+    <el-dialog v-model="showKbUploadDialog" title="📚 上传知识库资料" width="500px" custom-class="fancy-dialog" destroy-on-close>
+      <el-form label-position="top" size="large">
+        <el-form-item label="资料名称">
+          <el-input v-model="kbForm.name" placeholder="例如：课程补充阅读" />
+        </el-form-item>
+        <el-form-item label="简介（可选）">
+          <el-input v-model="kbForm.description" type="textarea" rows="2" placeholder="简要说明用途" />
+        </el-form-item>
+      </el-form>
+      <el-upload class="fancy-uploader" drag :auto-upload="false" :limit="1" :on-change="handleKbFileSelect" accept=".pdf,.doc,.docx,.txt">
+        <el-icon class="el-icon--upload brand-primary-text"><Upload /></el-icon>
+        <div class="el-upload__text">拖拽文件到此处，或 <em class="brand-primary-text">点击选择</em></div>
+        <template #tip><div class="el-upload__tip">支持 PDF、Word、TXT；解析与索引使用与智课一致的 Paddle/文本管线</div></template>
+      </el-upload>
+      <template #footer>
+        <div class="dlg-footer">
+          <el-button size="large" @click="showKbUploadDialog = false" round>取消</el-button>
+          <el-button size="large" type="primary" :loading="kbUploading" @click="submitKbUpload" round class="brand-btn">上传并索引</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <!-- 上传课件对话框 -->
     <el-dialog v-model="showUploadDialog" title="📤 上传课件" width="500px" custom-class="fancy-dialog" destroy-on-close>
       <el-upload class="fancy-uploader" drag :auto-upload="false" :limit="1" :on-change="handleFileSelect" accept=".pdf,.pptx,.ppt,.doc,.docx">
@@ -266,7 +367,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, markRaw } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, markRaw, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, Collection, Document, Avatar, Files } from '@element-plus/icons-vue' // 引入图标用于统计卡片
@@ -276,7 +377,11 @@ import {
   listMyCourses,
   listTeacherCourses,
   createCategory,
-  uploadCourseToCategory
+  uploadCourseToCategory,
+  listKnowledgeDocs,
+  uploadKnowledgeDoc,
+  deleteKnowledgeDoc,
+  fetchKnowledgeDocFile
 } from '@/api/lesson'
 
 const router = useRouter()
@@ -306,6 +411,17 @@ const showUploadDialog = ref(false)
 const uploading = ref(false)
 const uploadFile = ref(null)
 
+const kbTargetCourse = ref(null)
+const kbDocs = ref([])
+const kbLoading = ref(false)
+const showKbUploadDialog = ref(false)
+const kbUploading = ref(false)
+const kbUploadFile = ref(null)
+const kbForm = reactive({ name: '', description: '' })
+
+/** @type {ReturnType<typeof setInterval> | null} */
+let kbPollTimer = null
+
 const showProfileDialog = ref(false)
 const saveLoading = ref(false)
 const profileForm = reactive({ username: '', nickname: '', avatar: '' })
@@ -313,6 +429,7 @@ const profileForm = reactive({ username: '', nickname: '', avatar: '' })
 /* ---- 导航项 ---- */
 const navItems = [
   { key: 'courses', label: '我的课程库', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>' },
+  { key: 'knowledge', label: '我的知识库', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="12" y1="12" x2="12" y2="18"/></svg>' },
   { key: 'interactive', label: '互动课堂', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>' },
   { key: 'profile', label: '账户信息', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
   { key: 'logout', label: '安全退出', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>', danger: true },
@@ -358,10 +475,28 @@ const filteredCourses = computed(() => {
 /* ---- 导航处理 ---- */
 const handleNav = (item) => {
   mobileMenuOpen.value = false
-  if (item.key === 'courses') { activeNav.value = 'courses' }
-  else if (item.key === 'interactive') { activeNav.value = 'interactive'; goToInteractiveClassroom() }
-  else if (item.key === 'profile') { openProfileDialog() }
-  else if (item.key === 'logout') { logout() }
+  if (item.key === 'courses') {
+    activeNav.value = 'courses'
+  } else if (item.key === 'knowledge') {
+    activeNav.value = 'knowledge'
+    const list = filteredCourses.value
+    if (list.length && (!kbTargetCourse.value || !list.some((c) => c.id === kbTargetCourse.value.id))) {
+      kbTargetCourse.value = list[0]
+    }
+    if (kbTargetCourse.value?.id) loadKbDocs()
+  } else if (item.key === 'interactive') {
+    activeNav.value = 'interactive'
+    goToInteractiveClassroom()
+  } else if (item.key === 'profile') {
+    openProfileDialog()
+  } else if (item.key === 'logout') {
+    logout()
+  }
+}
+
+const selectKbCourse = (course) => {
+  kbTargetCourse.value = course
+  loadKbDocs()
 }
 
 /* ---- 业务逻辑（全部保留原始功能） ---- */
@@ -454,8 +589,175 @@ const loadCourses = async () => {
       const u = courses.value.find(c => c.id === activeCourse.value.id)
       if (u) activeCourse.value = { ...u }
     }
+    if (activeNav.value === 'knowledge') {
+      await nextTick()
+      const list = filteredCourses.value
+      if (list.length) {
+        const cur = kbTargetCourse.value
+        const still = cur && list.some((c) => c.id === cur.id)
+        if (!still) kbTargetCourse.value = list[0]
+        loadKbDocs()
+      } else {
+        kbTargetCourse.value = null
+        kbDocs.value = []
+      }
+    }
   } catch (error) { console.error('加载课程失败:', error); ElMessage.error('加载课程数据失败') } finally { loadingCourses.value = false }
 }
+
+const kbDocStatus = (doc) => {
+  if (doc.indexStatus) return doc.indexStatus
+  if (doc.hasRag) return 'ready'
+  return 'empty'
+}
+
+const kbStatusLabel = (doc) => {
+  const s = kbDocStatus(doc)
+  if (s === 'processing') return '解析与建索引中'
+  if (s === 'ready') return '已索引'
+  if (s === 'failed') return '索引失败'
+  return '未建立索引'
+}
+
+const clearKbPoll = () => {
+  if (kbPollTimer != null) {
+    clearInterval(kbPollTimer)
+    kbPollTimer = null
+  }
+}
+
+const loadKbDocs = async (silent = false) => {
+  const cid = kbTargetCourse.value?.id
+  if (!cid) {
+    kbDocs.value = []
+    return
+  }
+  if (!silent) kbLoading.value = true
+  try {
+    const res = await listKnowledgeDocs(cid)
+    kbDocs.value = Array.isArray(res.data) ? res.data : []
+  } catch (e) {
+    kbDocs.value = []
+  } finally {
+    if (!silent) kbLoading.value = false
+  }
+}
+
+const openKbUploadDialog = () => {
+  if (!kbTargetCourse.value) {
+    ElMessage.warning('请先在左侧选择一门课程')
+    return
+  }
+  kbForm.name = ''
+  kbForm.description = ''
+  kbUploadFile.value = null
+  showKbUploadDialog.value = true
+}
+
+const handleKbFileSelect = (file) => {
+  kbUploadFile.value = file.raw
+  if (!kbForm.name.trim() && file.name) {
+    kbForm.name = file.name.replace(/\.[^.]+$/, '')
+  }
+}
+
+const submitKbUpload = async () => {
+  if (!kbUploadFile.value) return ElMessage.warning('请选择文件')
+  if (!kbForm.name.trim()) return ElMessage.warning('请填写资料名称')
+  if (!kbTargetCourse.value?.id) return
+  kbUploading.value = true
+  try {
+    await uploadKnowledgeDoc(kbUploadFile.value, kbTargetCourse.value.id, kbForm.name.trim(), kbForm.description.trim())
+    ElMessage.success('资料已添加，解析进度见右侧列表')
+    showKbUploadDialog.value = false
+    kbUploadFile.value = null
+    await loadKbDocs()
+  } catch (e) {
+    ElMessage.error('上传失败')
+  } finally {
+    kbUploading.value = false
+  }
+}
+
+const openKbDoc = async (doc) => {
+  try {
+    const res = await fetchKnowledgeDocFile(doc.id)
+    const blob = res.data
+    if (blob instanceof Blob && blob.type && blob.type.includes('application/json')) {
+      const text = await blob.text()
+      try {
+        const j = JSON.parse(text)
+        ElMessage.error(j.msg || '无法打开文件')
+      } catch {
+        ElMessage.error('无法打开文件')
+      }
+      return
+    }
+    const ext = (doc.fileType || '').toLowerCase()
+    if (ext === 'doc' || ext === 'docx') {
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = ext && !String(doc.name).toLowerCase().endsWith(`.${ext}`) ? `${doc.name}.${ext}` : doc.name
+      a.rel = 'noopener'
+      a.click()
+      URL.revokeObjectURL(url)
+      return
+    }
+    const url = URL.createObjectURL(blob)
+    window.open(url, '_blank', 'noopener')
+    setTimeout(() => URL.revokeObjectURL(url), 120000)
+  } catch (e) {
+    ElMessage.error('无法打开文件')
+  }
+}
+
+const removeKbDoc = async (doc) => {
+  try {
+    await ElMessageBox.confirm(`确定删除「${doc.name}」？`, '删除知识库资料')
+    await deleteKnowledgeDoc(doc.id)
+    ElMessage.success('已删除')
+    await loadKbDocs()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败')
+  }
+}
+
+watch(
+  () => [activeNav.value, kbTargetCourse.value?.id],
+  () => {
+    if (activeNav.value === 'knowledge' && kbTargetCourse.value?.id) loadKbDocs()
+  }
+)
+
+watch(filteredCourses, (list) => {
+  if (activeNav.value !== 'knowledge' || loadingCourses.value) return
+  if (!list.length) {
+    kbTargetCourse.value = null
+    kbDocs.value = []
+    return
+  }
+  if (!kbTargetCourse.value || !list.some((c) => c.id === kbTargetCourse.value.id)) {
+    kbTargetCourse.value = list[0]
+    loadKbDocs()
+  }
+})
+
+watch(
+  () => ({
+    processing:
+      activeNav.value === 'knowledge' &&
+      kbDocs.value.some((d) => kbDocStatus(d) === 'processing'),
+    cid: kbTargetCourse.value?.id
+  }),
+  (v) => {
+    clearKbPoll()
+    if (!v.processing || !v.cid) return
+    kbPollTimer = setInterval(() => {
+      loadKbDocs(true)
+    }, 2500)
+  }
+)
 
 const enterCourse = (cw) => router.push(`/student/classroom/${cw.id}`)
 const goToInteractiveClassroom = () => router.push('/student/interactive-classroom')
@@ -470,7 +772,10 @@ onMounted(() => {
   window.addEventListener('resize', checkMobile)
   loadCourses()
 })
-onUnmounted(() => { window.removeEventListener('resize', checkMobile) })
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
+  clearKbPoll()
+})
 </script>
 
 <style scoped>
@@ -950,6 +1255,130 @@ onUnmounted(() => { window.removeEventListener('resize', checkMobile) })
   cursor: pointer; white-space: nowrap; transition: all 0.3s;
 }
 .cw-item:hover .cw-go { background: var(--brand-primary); color: #FFF; transform: scale(1.05); }
+
+.kb-list { display: flex; flex-direction: column; gap: 12px; min-height: 48px; }
+.kb-empty { padding: 28px 0 !important; }
+.kb-item {
+  display: flex; align-items: flex-start; gap: 14px;
+  padding: 16px 18px;
+  background: linear-gradient(145deg, rgba(255,255,255,0.95), rgba(248,250,255,0.98));
+  border-radius: var(--r-md);
+  border: 1px solid rgba(48, 122, 227, 0.12);
+  box-shadow: 0 2px 12px rgba(20, 66, 211, 0.04);
+  transition: border-color 0.25s, box-shadow 0.25s, transform 0.2s;
+}
+.kb-item:hover {
+  border-color: rgba(48, 122, 227, 0.28);
+  box-shadow: 0 8px 24px rgba(48, 122, 227, 0.1);
+}
+.kb-item--processing {
+  border-color: rgba(48, 122, 227, 0.35);
+  background: linear-gradient(145deg, rgba(210,230,254,0.35), rgba(255,255,255,0.95));
+}
+.kb-icon-wrap {
+  width: 44px; height: 44px; border-radius: 12px;
+  background: var(--brand-light);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid rgba(48, 122, 227, 0.12);
+}
+.kb-icon { font-size: 22px; line-height: 1; }
+.kb-info { flex: 1; min-width: 0; }
+.kb-name-btn {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  width: 100%; text-align: left;
+  padding: 0; margin: 0; border: none; background: none; cursor: pointer;
+  font: inherit;
+}
+.kb-name-btn:hover .kb-name { color: var(--brand-primary); text-decoration: underline; text-underline-offset: 3px; }
+.kb-name {
+  font-size: 15px; font-weight: 700; color: var(--c-text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1; min-width: 0;
+}
+.kb-open-hint {
+  font-size: 12px; font-weight: 700; color: var(--brand-primary);
+  flex-shrink: 0; opacity: 0.85;
+}
+.kb-meta { font-size: 12px; color: var(--c-text2); margin-top: 6px; line-height: 1.45; }
+.kb-progress-block { margin-top: 10px; max-width: 420px; }
+.kb-progress-block :deep(.el-progress-bar__outer) { border-radius: 6px; }
+.kb-progress-text { display: block; font-size: 11px; color: var(--brand-primary); margin-top: 6px; font-weight: 600; }
+.kb-del { flex-shrink: 0; margin-top: 2px; }
+
+.kb-page-wrap { padding: 0 8px 24px; }
+.kb-page-lead {
+  font-size: 13px; color: var(--c-text2); line-height: 1.55; max-width: 720px; margin: 0 0 20px 4px;
+}
+.kb-page-empty { padding: 48px 0 !important; }
+.kb-page-layout {
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) 1fr;
+  gap: 20px;
+  align-items: start;
+  min-height: 320px;
+}
+@media (max-width: 768px) {
+  .kb-page-layout { grid-template-columns: 1fr; }
+}
+.kb-page-courses {
+  background: var(--c-surface);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--c-border);
+  padding: 14px;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+}
+.kb-page-aside-title {
+  font-size: 12px; font-weight: 800; color: var(--brand-primary); text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 12px; padding-left: 4px;
+}
+.kb-page-course-btn {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  width: 100%; text-align: left;
+  padding: 12px 14px; margin-bottom: 8px; border: 1px solid var(--c-border);
+  border-radius: var(--r-md); background: #fff; cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+.kb-page-course-btn:last-child { margin-bottom: 0; }
+.kb-page-course-btn:hover {
+  border-color: var(--brand-primary); background: rgba(48, 122, 227, 0.04);
+}
+.kb-page-course-btn.active {
+  border-color: var(--brand-primary); background: linear-gradient(135deg, rgba(48,122,227,0.1), rgba(20,66,211,0.06));
+  box-shadow: 0 4px 14px rgba(48, 122, 227, 0.12);
+}
+.kb-page-course-name { font-size: 14px; font-weight: 700; color: var(--c-text); line-height: 1.3; }
+.kb-page-course-meta { font-size: 11px; color: var(--c-text2); }
+.kb-page-panel {
+  background: var(--c-surface);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--c-border);
+  padding: 20px 22px;
+  min-height: 320px;
+}
+.kb-page-panel--glass {
+  background: linear-gradient(165deg, rgba(255,255,255,0.98) 0%, rgba(248,250,255,0.99) 100%);
+  box-shadow: 0 12px 40px rgba(20, 66, 211, 0.06);
+  border: 1px solid rgba(48, 122, 227, 0.14);
+}
+.kb-page-panel-title-wrap { min-width: 0; }
+.kb-page-panel-sub {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--c-text2);
+  font-weight: 500;
+}
+.kb-page-panel--empty {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--c-text2); font-size: 14px;
+}
+.kb-page-panel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--c-border);
+}
+.kb-page-panel-title { margin: 0; font-size: 18px; font-weight: 800; color: var(--brand-deep); }
+.kb-page-doc-list { min-height: 120px; }
 
 /* ================================================================
    对话框 & 表单

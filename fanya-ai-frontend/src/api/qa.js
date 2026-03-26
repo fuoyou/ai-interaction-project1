@@ -20,7 +20,9 @@ export function qaInteract(data) {
       questionContent: data.questionContent || data.question, // 兼容参数
       currentSectionId: data.currentSectionId || data.pageNum || 'sec001',
       historyQa: data.historyQa || [],
-      currentPageContent: data.currentPageContent || ''
+      currentPageContent: data.currentPageContent || '',
+      useCourseKnowledgeBase: data.useCourseKnowledgeBase ? true : false,
+      categoryId: data.categoryId || ''
     }
   })
 }
@@ -58,6 +60,8 @@ export async function qaInteractStream(data, handlers = {}) {
     currentSectionId: data.currentSectionId || data.pageNum || 'sec001',
     historyQa: data.historyQa || [],
     currentPageContent: data.currentPageContent || '',
+    useCourseKnowledgeBase: data.useCourseKnowledgeBase ? true : false,
+    categoryId: data.categoryId || '',
     timestamp
   }
   payload.enc = generateSignature(payload)
@@ -151,6 +155,46 @@ export function getQAHistory(sessionId) {
   })
 }
 
+/**
+ * 课件配图 + 上下文 → 通义千问视觉（需后端 DASHSCOPE_API_KEY）
+ * 不使用 enc 签名（body 含大图）
+ */
+export async function qaVisionExplain(payload) {
+  const token = localStorage.getItem('token')
+  const headers = { 'Content-Type': 'application/json' }
+  if (token && token !== 'undefined') {
+    headers.Authorization = token.startsWith('Bearer ') ? token : `Bearer ${token}`
+  }
+  const res = await fetch('/api/v1/qa/vision', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      imageBase64: payload.imageBase64,
+      questionContent: payload.question || '',
+      contextText: payload.contextText || '',
+      lessonId: payload.lessonId,
+      courseId: payload.courseId,
+      pageNum: payload.pageNum,
+      currentSectionId: payload.currentSectionId,
+      fileName: payload.fileName || ''
+    })
+  })
+  const raw = await res.text().catch(() => '')
+  let json = {}
+  if (raw) {
+    try {
+      json = JSON.parse(raw)
+    } catch {
+      json = {}
+    }
+  }
+  if (json.code === 200 || json.code === '200') {
+    return json
+  }
+  const hint = json.msg || (res.ok ? '' : `HTTP ${res.status}`)
+  throw new Error(hint || '视觉问答失败')
+}
+
 // ==================== 兼容旧接口 ====================
 
 /**
@@ -161,6 +205,9 @@ export function chatWithAI(data) {
     lessonId: data.courseId,
     questionContent: data.question,
     currentSectionId: `sec${data.pageNum || 1}`,
-    historyQa: data.historyQa || []
+    historyQa: data.historyQa || [],
+    currentPageContent: data.currentPageContent || '',
+    useCourseKnowledgeBase: data.useCourseKnowledgeBase ? true : false,
+    categoryId: data.categoryId || ''
   })
 }

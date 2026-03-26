@@ -175,6 +175,19 @@
             </div>
           </header>
 
+          <!-- 与学生端一致：Paddle / 转 PDF 等解析阶段顶部提示（讲稿生成阶段不占用顶栏） -->
+          <div v-if="showWorkbenchParsingBanner" class="workbench-parsing-banner">
+            <el-icon class="is-loading workbench-parsing-icon"><Loading /></el-icon>
+            <span class="workbench-parsing-text">{{ parseParsingPhaseUi.label }}</span>
+            <el-progress
+              v-if="parseParsingPhaseUi.showProgress"
+              :percentage="parseParsingPhaseUi.percentage"
+              :indeterminate="parseParsingPhaseUi.indeterminate"
+              :stroke-width="4"
+              class="workbench-parsing-progress"
+            />
+          </div>
+
           <div class="editor-body">
             <!-- 加载蒙层 -->
             <div v-if="loadingDetail" class="status-mask">
@@ -243,6 +256,64 @@ const isUploading = ref(false)
 const currentCategoryKnowledge = ref([])
 const currentCategoryId = ref('')
 const paddlePages = ref([])
+
+/** 课件详情中的解析阶段（与学生端 lessonDetail 一致，用于顶栏文案） */
+const lessonDetail = ref({ status: null, taskStatus: null, pageCount: 0, aiScriptLen: 0 })
+
+const resetLessonDetail = () => {
+  lessonDetail.value = { status: null, taskStatus: null, pageCount: 0, aiScriptLen: 0 }
+}
+
+const applyLessonDetail = (d) => {
+  if (!d) return
+  lessonDetail.value = {
+    status: d.status,
+    taskStatus: d.taskStatus,
+    pageCount: d.fileInfo?.pageCount ?? 0,
+    aiScriptLen: Array.isArray(d.aiScript) ? d.aiScript.length : 0
+  }
+}
+
+/** 与学生端 parseParsingPhaseUi 对齐：仅解析链路的文案与进度 */
+const parseParsingPhaseUi = computed(() => {
+  const d = lessonDetail.value
+  const ts = d.taskStatus
+  const st = d.status
+  const idle = { label: '', showProgress: false, indeterminate: true, percentage: 0 }
+  if (st === 3 || st === 9) return idle
+  if (ts === 'converting_pdf') {
+    return {
+      label: '正在将课件转换为 PDF（WPS / PowerPoint）…',
+      showProgress: true,
+      indeterminate: true,
+      percentage: 0
+    }
+  }
+  if (ts === 'paddle_parsing') {
+    return {
+      label: 'PaddleOCR-VL 正在解析版面与文字…',
+      showProgress: true,
+      indeterminate: true,
+      percentage: 0
+    }
+  }
+  if (ts === 'generating_script') {
+    return { label: '', showProgress: false, indeterminate: true, percentage: 0 }
+  }
+  return { label: '课件处理中…', showProgress: false, indeterminate: true, percentage: 0 }
+})
+
+/** 顶栏：解析中且非讲稿生成、非重新生成讲稿中 */
+const showWorkbenchParsingBanner = computed(() => {
+  if (!currentCourseId.value) return false
+  const d = lessonDetail.value
+  if (d.status === null || d.status === undefined) return false
+  if (d.status === 9 || d.status === 3) return false
+  const ts = d.taskStatus || ''
+  if (ts === 'generating_script') return false
+  if (String(ts).startsWith('regenerating_script')) return false
+  return true
+})
 
 const sidebarDrawerVisible = ref(false)
 const isMobile = ref(false)
@@ -345,6 +416,7 @@ const selectCourse = async (courseRow, rawFile = null) => {
   currentCourseId.value = courseRow.id
   currentCourseName.value = courseRow.courseName
   currentEditIndex.value = 0
+  resetLessonDetail()
   isSystemUpdating = true
   slideData.value = []
   paddlePages.value = []
@@ -372,6 +444,7 @@ const selectCourse = async (courseRow, rawFile = null) => {
   try {
     const res = await getCourseDetail(courseRow.id)
     const detailData = res.data
+    applyLessonDetail(detailData)
     paddlePages.value = detailData.paddlePages || detailData.structurePreview?.paddlePages || []
     if (detailData.fileUrl && (isPdfName(detailData.fileUrl) || isPptxName(detailData.fileUrl))) {
       pdfSource.value = `/api/v1/lesson/files/${detailData.fileUrl}`
@@ -425,10 +498,16 @@ const startPolling = (courseId) => {
     try {
       const res = await getCourseDetail(courseId)
       const course = res.data
+      applyLessonDetail(course)
       paddlePages.value = course.paddlePages || course.structurePreview?.paddlePages || []
       if (course.fileUrl && (isPdfName(course.fileUrl) || isPptxName(course.fileUrl))) {
         pdfSource.value = `/api/v1/lesson/files/${course.fileUrl}`
       }
+
+      const ts = course.taskStatus || ''
+      if (ts === 'converting_pdf') pollingStatus.value = '正在转换为 PDF…'
+      else if (ts === 'paddle_parsing') pollingStatus.value = 'PaddleOCR-VL 正在解析版面…'
+      else if (ts === 'processing') pollingStatus.value = '课件处理中…'
       
       // 检查是否已完成
       if (course.status === 3) {
@@ -441,8 +520,10 @@ const startPolling = (courseId) => {
       
       if (course.aiScript && course.aiScript.length > 0) {
         parseData(course.aiScript, course.audioScript || [])
-        if (course.status >= 2) { pollingStatus.value = '正在合成语音...' } 
-        else { pollingStatus.value = `正在生成讲稿... (${course.aiScript.length}页已完成)` }
+        if (ts === 'generating_script') {
+          if (course.status >= 2) pollingStatus.value = '正在合成语音...'
+          else pollingStatus.value = `正在生成讲稿... (${course.aiScript.length}页已完成)`
+        }
       }
       
       if (course.status === 2) {
@@ -467,6 +548,7 @@ const waitForAudioGeneration = (courseId) => {
     try {
       const res = await getCourseDetail(courseId)
       const data = res.data
+      applyLessonDetail(data)
       let audioReady = false
       if (data.status === 3) audioReady = true
       else if (data.audioScript && Array.isArray(data.audioScript) && data.audioScript.length > 0) {
@@ -732,6 +814,35 @@ const handleSelectCourseFromHome = (course, categoryKnowledge = [], categoryId =
   font-weight: bold;
   color: #1442D3;
   font-size: 18px;
+}
+
+/* 与学生端 parsing-hint-row 同逻辑，配色对齐教师端品牌 */
+.workbench-parsing-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 24px;
+  background: linear-gradient(90deg, #e8f1fc 0%, #f0f6ff 100%);
+  border-bottom: 1px solid #d2e6fe;
+  font-size: 13px;
+  color: #1442d3;
+  font-weight: 600;
+}
+.workbench-parsing-icon {
+  flex-shrink: 0;
+  color: #307ae3;
+}
+.workbench-parsing-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.45;
+}
+.workbench-parsing-progress {
+  flex: 1 1 160px;
+  min-width: 120px;
+  max-width: 360px;
 }
 
 .editor-body {

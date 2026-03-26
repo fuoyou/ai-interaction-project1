@@ -59,6 +59,7 @@
           <div class="pdf-page-wrapper glass-page-shadow" :style="{ transform: `scale(${scale})`, transformOrigin: 'center center' }">
             <LessonPdfCanvas
               v-if="usePaddleOverlay"
+              ref="lessonCanvasRef"
               :pdf-url="source"
               :page-num="page"
               :render-width="pdfRenderWidth"
@@ -127,11 +128,12 @@ import { ZoomIn, ZoomOut, Loading } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 const props = defineProps(['source', 'page', 'loading', 'paddlePages'])
-const emit = defineEmits(['changePage', 'upload', 'textSelected', 'formulaSelected'])
+const emit = defineEmits(['changePage', 'upload', 'textSelected', 'formulaSelected', 'imageSelected'])
 
 const scale = ref(1.0); const totalPages = ref(0); const jumpPage = ref(null); const pptxContainer = ref(null); const pdfViewRef = ref(null); const pdfRenderWidth = ref(800); const pdfAspectRatio = ref(null); let pptxPreviewer = null; let resizeTimer = null; let measureRetryTimer = null; let containerObserver = null;
 const formulaRegions = ref([]); const hoveredFormulaIndex = ref(-1);
 const selectedBlockId = ref(null)
+const lessonCanvasRef = ref(null)
 
 const isLandscapePdf = computed(() => pdfAspectRatio.value !== null && pdfAspectRatio.value >= 1)
 const isPptFile = computed(() => { if (!props.source) return false; const s = String(props.source).toLowerCase(); return s.endsWith('.ppt') || s.endsWith('.pptx') })
@@ -144,6 +146,24 @@ const currentOcrPage = computed(() => paddlePagesList.value.find((p) => p.page_n
 
 const onPaddleBlockClick = (block) => {
   selectedBlockId.value = block?.id || null
+  const t = String(block?.type || '').toLowerCase()
+  const lbl = String(block?.label || block?.block_label || '').toLowerCase()
+  const isFigure = t === 'figure' || /figure|image|chart|picture/.test(lbl)
+  if (isFigure && lessonCanvasRef.value?.cropBlockToDataURL) {
+    const dataUrl = lessonCanvasRef.value.cropBlockToDataURL(block)
+    if (dataUrl) {
+      emit('imageSelected', {
+        imageBase64: dataUrl,
+        page: props.page,
+        blockId: block?.id,
+        block
+      })
+      ElMessage.success('已截取配图，正在调用通义千问视觉解读…')
+      return
+    }
+    ElMessage.warning('无法截取该区域，请稍后重试')
+    return
+  }
   const text = (block?.text || '').trim()
   if (text) {
     emit('textSelected', {

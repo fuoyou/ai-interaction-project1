@@ -112,7 +112,7 @@
 
           <el-tab-pane label="底层知识库" name="knowledge">
             <div class="tab-header">
-              <span class="count-info">共 {{ activeCourse.knowledge?.length || 0 }} 份补充资料</span>
+              <span class="count-info">共 {{ activeCourse.knowledge?.length || 0 }} 份补充资料（学生端同课程下可见并共用）</span>
               <el-button type="primary" plain size="small" @click="openUploadDialog('knowledge')">
                 <el-icon><DocumentAdd /></el-icon> 补充资料
               </el-button>
@@ -121,11 +121,18 @@
             
             <div class="file-list">
               <div v-if="!activeCourse.knowledge?.length" class="empty-list">暂无底层知识库资料</div>
-              <div v-for="doc in activeCourse.knowledge" :key="doc.id" class="file-item">
+              <div v-for="doc in activeCourse.knowledge" :key="doc.id" class="file-item knowledge-doc-row">
                 <div class="file-icon accent"><el-icon><DocumentCopy /></el-icon></div>
                 <div class="file-info">
-                  <div class="file-name">{{ doc.name }}</div>
-                  <div class="file-desc">{{ doc.description || '已补充至 AI 知识库' }}</div>
+                  <button type="button" class="knowledge-name-hit" @click="openKnowledgeDoc(doc)">
+                    <span class="file-name">{{ doc.name }}</span>
+                    <span class="knowledge-preview-pill">预览</span>
+                  </button>
+                  <div class="file-desc">{{ knowledgeDocMetaLine(doc) }}</div>
+                  <div v-if="knowledgeIndexStatus(doc) === 'processing'" class="knowledge-progress">
+                    <el-progress :indeterminate="true" :duration="2.5" :stroke-width="4" :show-text="false" />
+                    <span class="knowledge-progress-label">正在解析与建索引…</span>
+                  </div>
                 </div>
                 <el-button type="danger" link @click.stop="deleteItem('knowledge', doc.id)">删除</el-button>
               </div>
@@ -194,10 +201,10 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, computed, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { Plus, Search, MoreFilled, Upload, DocumentAdd, Document, DocumentCopy, UploadFilled, InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listCategories, createCategory, updateCategory, deleteCategory, listMyCourses, uploadCourseToCategory, listKnowledgeDocs, uploadKnowledgeDoc, deleteKnowledgeDoc, deleteCourseware } from '@/api/lesson'
+import { listCategories, createCategory, updateCategory, deleteCategory, listMyCourses, uploadCourseToCategory, listKnowledgeDocs, uploadKnowledgeDoc, deleteKnowledgeDoc, deleteCourseware, fetchKnowledgeDocFile } from '@/api/lesson'
 
 const emit = defineEmits(['selectCourse'])
 
@@ -240,6 +247,71 @@ const uploadType = ref('courseware')
 const uploadFile = ref(null)
 const uploadDesc = ref('')
 const uploading = ref(false)
+
+/** @type {ReturnType<typeof setInterval> | null} */
+let knowledgePollTimer = null
+
+const clearKnowledgePoll = () => {
+  if (knowledgePollTimer != null) {
+    clearInterval(knowledgePollTimer)
+    knowledgePollTimer = null
+  }
+}
+
+const knowledgeIndexStatus = (doc) => {
+  if (doc.indexStatus) return doc.indexStatus
+  if (doc.hasRag) return 'ready'
+  return 'empty'
+}
+
+const knowledgeStatusText = (doc) => {
+  const s = knowledgeIndexStatus(doc)
+  if (s === 'processing') return '解析与建索引中'
+  if (s === 'ready') return '已索引'
+  if (s === 'failed') return '索引失败'
+  return '未建立索引'
+}
+
+const knowledgeDocMetaLine = (doc) => {
+  const ft = doc.fileType?.toUpperCase() || '—'
+  const st = knowledgeStatusText(doc)
+  const t = doc.createTime || ''
+  const desc = doc.description ? ` · ${doc.description}` : ''
+  return `${ft} · ${st}${t ? ' · ' + t : ''}${desc}`
+}
+
+const openKnowledgeDoc = async (doc) => {
+  try {
+    const res = await fetchKnowledgeDocFile(doc.id)
+    const blob = res.data
+    if (blob instanceof Blob && blob.type && blob.type.includes('application/json')) {
+      const text = await blob.text()
+      try {
+        const j = JSON.parse(text)
+        ElMessage.error(j.msg || '无法打开文件')
+      } catch {
+        ElMessage.error('无法打开文件')
+      }
+      return
+    }
+    const ext = (doc.fileType || '').toLowerCase()
+    if (ext === 'doc' || ext === 'docx') {
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = ext && !String(doc.name).toLowerCase().endsWith(`.${ext}`) ? `${doc.name}.${ext}` : doc.name
+      a.rel = 'noopener'
+      a.click()
+      URL.revokeObjectURL(url)
+      return
+    }
+    const url = URL.createObjectURL(blob)
+    window.open(url, '_blank', 'noopener')
+    setTimeout(() => URL.revokeObjectURL(url), 120000)
+  } catch (e) {
+    ElMessage.error('无法打开文件')
+  }
+}
 
 const filteredCourses = computed(() => {
   let result = courses.value
@@ -380,9 +452,9 @@ const submitUpload = async () => {
       await uploadCourseToCategory(uploadFile.value, activeCourse.value.id)
       ElMessage.success('课件上传成功，AI 正在后台进行深度解析')
     } else {
-      const fileName = uploadFile.value.name
+      const fileName = uploadFile.value.name.replace(/\.[^.]+$/, '') || uploadFile.value.name
       await uploadKnowledgeDoc(uploadFile.value, activeCourse.value.id, fileName, uploadDesc.value)
-      ElMessage.success('底层知识库补充成功，AI已开始学习')
+      ElMessage.success('资料已添加，解析进度见列表')
     }
     showUploadDialog.value = false
     await loadCourses()
@@ -410,11 +482,27 @@ const deleteItem = (type, id) => {
   }).catch(() => {})
 }
 
+watch(
+  [drawerVisible, activeTab, activeCourse],
+  () => {
+    clearKnowledgePoll()
+    if (!drawerVisible.value || activeTab.value !== 'knowledge' || !activeCourse.value) return
+    const list = activeCourse.value.knowledge || []
+    const proc = list.some((d) => knowledgeIndexStatus(d) === 'processing')
+    if (!proc) return
+    knowledgePollTimer = setInterval(() => loadCourses(), 2800)
+  },
+  { deep: true }
+)
+
 onMounted(() => {
   loadCourses()
   window.addEventListener('resize', () => { drawerSize.value })
 })
-onUnmounted(() => { window.removeEventListener('resize', () => {}) })
+onUnmounted(() => {
+  window.removeEventListener('resize', () => {})
+  clearKnowledgePoll()
+})
 </script>
 
 <style scoped>
@@ -481,6 +569,19 @@ onUnmounted(() => { window.removeEventListener('resize', () => {}) })
 .file-info { flex: 1; overflow: hidden; }
 .file-name { font-size: 15px; font-weight: bold; color: #1442D3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-time, .file-desc { font-size: 13px; color: #ACB1EC; margin-top: 6px; }
+.knowledge-doc-row { align-items: flex-start; }
+.knowledge-name-hit {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  width: 100%; padding: 0; margin: 0; border: none; background: none; cursor: pointer;
+  font: inherit; text-align: left;
+}
+.knowledge-name-hit:hover .file-name { color: #307AE3; text-decoration: underline; text-underline-offset: 3px; }
+.knowledge-preview-pill {
+  font-size: 12px; font-weight: 700; color: #307AE3; background: rgba(210, 230, 254, 0.6);
+  padding: 2px 10px; border-radius: 999px;
+}
+.knowledge-progress { margin-top: 10px; max-width: 360px; }
+.knowledge-progress-label { display: block; font-size: 12px; color: #307AE3; margin-top: 6px; font-weight: 600; }
 .empty-list { text-align: center; color: #ACB1EC; padding: 40px 0; font-weight: bold; }
 :deep(.custom-uploader .el-upload-dragger) { border-radius: 12px; border-color: #D2E6FE; }
 :deep(.custom-uploader .el-upload-dragger:hover) { border-color: #307AE3; }

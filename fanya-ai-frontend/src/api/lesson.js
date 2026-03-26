@@ -260,7 +260,8 @@ export function deleteCategory(categoryId) {
 export function uploadKnowledgeDoc(file, categoryId, name, description = '') {
   const formData = new FormData()
   formData.append('file', file)
-  formData.append('categoryId', categoryId)
+  // 与后端 normalize 一致，保证师生同一课程分类 ID 对应同一资料池
+  formData.append('categoryId', categoryId == null ? '' : String(categoryId).trim())
   formData.append('name', name)
   formData.append('description', description)
   return request({
@@ -274,8 +275,9 @@ export function uploadKnowledgeDoc(file, categoryId, name, description = '') {
  * 获取分类下的知识库列表
  */
 export function listKnowledgeDocs(categoryId) {
+  const id = categoryId == null ? '' : String(categoryId).trim()
   return request({
-    url: `/v1/knowledge/list/${categoryId}`,
+    url: `/v1/knowledge/list/${encodeURIComponent(id)}`,
     method: 'get'
   })
 }
@@ -287,6 +289,15 @@ export function deleteKnowledgeDoc(docId) {
   return request({
     url: `/v1/knowledge/delete/${docId}`,
     method: 'delete'
+  })
+}
+
+/** 下载/预览知识库原文件（需登录，返回 Blob） */
+export function fetchKnowledgeDocFile(docId) {
+  return request({
+    url: `/v1/knowledge/file/${docId}`,
+    method: 'get',
+    responseType: 'blob'
   })
 }
 

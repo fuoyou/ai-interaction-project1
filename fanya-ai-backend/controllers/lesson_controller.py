@@ -17,6 +17,7 @@ from utils.normalize import pages_from_paddle_jsonl_lines, content_list_from_pad
 from utils.paddle_client import run_parse_pipeline
 from utils.ai_utils import AIGenerator, get_ai_generator
 from utils.api_utils import verify_signature, api_response
+from utils.kb_category import normalize_kb_category_id
 from utils.rag_utils import build_rag_chunks, dumps_rag_chunks, loads_rag_chunks
 
 lesson_bp = Blueprint('lesson', __name__)
@@ -143,7 +144,7 @@ def parse_lesson():
     try:
         current_user_id = get_jwt_identity()
         school_id = request.form.get('schoolId', 'sch10001')
-        course_id = request.form.get('courseId', 'default')
+        course_id = normalize_kb_category_id(request.form.get('courseId', 'default')) or 'default'
         
         if 'file' not in request.files:
             return api_response(code=400, msg='请上传课件文件')

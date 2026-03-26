@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify, send_from_directory, Response, st
 from flask_jwt_extended import get_jwt_identity, jwt_required
 from models.qa import QASession, QARecord
 from models.lesson import Lesson
+from models.knowledge import KnowledgeDoc
 from models.progress import RhythmAdjustment
 from extensions import db
 import os
@@ -15,7 +16,9 @@ from collections import OrderedDict
 from utils import tts_utils
 from utils.ai_utils import AIGenerator
 from utils.api_utils import verify_signature, api_response
+from utils.kb_category import normalize_kb_category_id
 from utils.file_utils import extract_text_from_pdf, extract_text_from_ppt
+from utils.qwen_vl_utils import qwen_vl_chat
 from utils.rag_utils import (
     RAGRetriever,
     build_rag_chunks,
@@ -65,14 +68,29 @@ def _invalidate_lesson_cache(lesson_id):
             _RAG_RETRIEVER_CACHE.pop(key, None)
 
 
-def _build_rag_context_with_cache(lesson_id, question, rag_chunks_raw, rag_chunks, top_k=3):
+def _build_rag_context_with_cache(
+    lesson_id, question, rag_chunks_raw, rag_chunks, top_k=3, source_name="当前课件"
+):
+    """返回 (拼接后的课件 RAG 上下文, 溯源列表)。"""
     if not question or not rag_chunks:
-        return ""
+        return "", []
     retriever = _get_cached_retriever(lesson_id, rag_chunks_raw, rag_chunks)
     hits = retriever.search(question, top_k=top_k)
     if not hits:
-        return ""
-    return "\n\n".join([f"[片段{i + 1}] {c}" for i, c in enumerate(hits)])
+        return "", []
+    ctx = "\n\n".join([f"[片段{i + 1}] {c}" for i, c in enumerate(hits)])
+    cites = []
+    for i, t in enumerate(hits):
+        snip = t if len(t) <= 280 else t[:280] + "…"
+        cites.append(
+            {
+                "kind": "courseware",
+                "ref": i + 1,
+                "sourceName": source_name or "当前课件",
+                "snippet": snip,
+            }
+        )
+    return ctx, cites
 
 
 def _should_attempt_rebuild(lesson_id):
@@ -85,13 +103,31 @@ def _should_attempt_rebuild(lesson_id):
         return True
 
 
+def _resolve_kb_category_id(data, lesson_id):
+    """优先使用请求中的 categoryId；否则从课件记录读取 course_id（与教师端/学生端知识库同一分类即同一资料池）。"""
+    cid = normalize_kb_category_id(data.get("categoryId") or data.get("courseCategoryId") or "")
+    if cid:
+        return cid
+    if not lesson_id:
+        return ""
+    lesson = Lesson.query.filter(
+        (Lesson.parse_id == str(lesson_id)) | (Lesson.id == lesson_id)
+    ).first()
+    if lesson and lesson.course_id is not None:
+        s = normalize_kb_category_id(lesson.course_id)
+        if s:
+            return s
+    return ""
+
+
 def _resolve_lesson_context(lesson_id, current_section_id, question_content, allow_rebuild=True):
     context_text = ""
     rag_context_text = ""
     related_knowledge = {}
+    lesson_rag_citations = []
 
     if not lesson_id:
-        return context_text, rag_context_text, related_knowledge
+        return context_text, rag_context_text, related_knowledge, lesson_rag_citations
 
     lesson = Lesson.query.filter((Lesson.parse_id == lesson_id) | (Lesson.id == lesson_id)).first()
     if lesson and lesson.script_content:
@@ -110,6 +146,7 @@ def _resolve_lesson_context(lesson_id, current_section_id, question_content, all
             pass
 
     if lesson:
+        src_label = lesson.file_name or "当前课件"
         rag_chunks_raw = getattr(lesson, "rag_chunks", None)
         rag_chunks = loads_rag_chunks(rag_chunks_raw)
         if not rag_chunks and allow_rebuild:
@@ -129,13 +166,15 @@ def _resolve_lesson_context(lesson_id, current_section_id, question_content, all
                     db.session.commit()
                     _invalidate_lesson_cache(lesson.id)
 
-        rag_context_text = _build_rag_context_with_cache(
-            lesson.id,
-            question_content,
-            rag_chunks_raw,
-            rag_chunks,
-            top_k=3
-        ) if rag_chunks else ""
+        if rag_chunks:
+            rag_context_text, lesson_rag_citations = _build_rag_context_with_cache(
+                lesson.id,
+                question_content,
+                rag_chunks_raw,
+                rag_chunks,
+                top_k=3,
+                source_name=src_label,
+            )
 
         if allow_rebuild and not rag_context_text and _should_attempt_rebuild(lesson.id):
             source_file = os.path.join("uploads", lesson.file_url) if lesson.file_url else ""
@@ -152,15 +191,73 @@ def _resolve_lesson_context(lesson_id, current_section_id, question_content, all
                     rag_chunks_raw = lesson.rag_chunks
                     db.session.commit()
                     _invalidate_lesson_cache(lesson.id)
-                    rag_context_text = _build_rag_context_with_cache(
+                    rag_context_text, lesson_rag_citations = _build_rag_context_with_cache(
                         lesson.id,
                         question_content,
                         rag_chunks_raw,
                         rebuilt_chunks,
-                        top_k=3
+                        top_k=3,
+                        source_name=src_label,
                     )
 
-    return context_text, rag_context_text, related_knowledge
+    return context_text, rag_context_text, related_knowledge, lesson_rag_citations
+
+
+def _retrieve_course_knowledge_context(category_id, question, top_k=5, per_doc_top=2):
+    """
+    按课程分类（与课件 courseId/categoryId 一致）检索知识库片段，返回拼接上下文与溯源列表。
+    检索策略：每份资料内 BM25 取前 per_doc_top，再按分数全局取 top_k（与 AgenticRAGOCR 的「多片段打分再截断」思路一致，向量库换为现有 BM25）。
+    """
+    cat_key = normalize_kb_category_id(category_id)
+    if not cat_key or not (question or "").strip():
+        return "", []
+
+    docs = (
+        KnowledgeDoc.query.filter_by(category_id=cat_key)
+        .order_by(KnowledgeDoc.create_time.desc())
+        .all()
+    )
+    scored = []
+    for doc in docs:
+        chunks = loads_rag_chunks(doc.rag_chunks)
+        if not chunks:
+            continue
+        retriever = RAGRetriever(chunks)
+        for text, sc in retriever.search_with_scores(question, top_k=per_doc_top):
+            if not (text or "").strip():
+                continue
+            scored.append(
+                (
+                    sc,
+                    text.strip(),
+                    {"docId": doc.id, "sourceName": doc.name or "未命名资料", "fileType": doc.file_type or ""},
+                )
+            )
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    picked = scored[:top_k]
+    if not picked:
+        return "", []
+
+    context_lines = []
+    citations = []
+    for i, (_, text, meta) in enumerate(picked):
+        ref = i + 1
+        title = meta["sourceName"]
+        context_lines.append(f"[课程知识库·资料{ref}]《{title}》\n{text}")
+        snip = text if len(text) <= 320 else text[:320] + "…"
+        citations.append(
+            {
+                "kind": "knowledge",
+                "ref": ref,
+                "docId": meta["docId"],
+                "sourceName": title,
+                "snippet": snip,
+                "fileType": meta.get("fileType") or "",
+            }
+        )
+
+    return "\n\n".join(context_lines), citations
 
 
 def _format_history(history_qa):
@@ -179,7 +276,8 @@ def _build_final_context(
     context_text,
     rag_context_text,
     current_section_id=None,
-    current_page_content=None
+    current_page_content=None,
+    kb_context_text=None,
 ):
     system_prefix = "你是一个耐心、温柔的大学教师。" if is_confused else "你是一个专业、富有激情的大学教师。"
     page_hint = f"\n当前页标识：{current_section_id}" if current_section_id else ""
@@ -192,7 +290,15 @@ def _build_final_context(
         f"\n课程上下文：{context_text}"
     )
     if rag_context_text:
-        final_context += f"\n\n检索到的课件原文片段：\n{rag_context_text}"
+        final_context += (
+            f"\n\n检索到的课件原文片段：\n{rag_context_text}"
+            f"\n若回答参考了上述片段，请在相应位置标注编号，如[片段1]、[片段2]。"
+        )
+    if kb_context_text:
+        final_context += (
+            f"\n\n以下为该课程「知识库」检索到的补充资料（非当前页正文，回答若用到请用脚注形式标明来源编号，如[资料1]）：\n"
+            f"{kb_context_text}"
+        )
     return final_context
 
 
@@ -223,7 +329,8 @@ def qa_interact():
     current_page_content = (data.get('currentPageContent') or "").strip()
     current_section_id = data.get('currentSectionId')
     history_qa = data.get('historyQa', [])
-    
+    use_course_kb = bool(data.get('useCourseKnowledgeBase') or data.get('useKnowledgeBase'))
+
     if not question_content:
         return api_response(code=400, msg='提问内容不能为空')
     
@@ -235,11 +342,27 @@ def qa_interact():
         session = QASession.query.filter_by(session_id=session_id).first()
         if session: session.current_section_id = current_section_id
     
-    context_text, rag_context_text, related_knowledge = _resolve_lesson_context(
+    context_text, rag_context_text, related_knowledge, courseware_citations = _resolve_lesson_context(
         lesson_id,
         current_section_id,
         question_content
     )
+
+    course_category_id = _resolve_kb_category_id(data, lesson_id)
+    kb_context_text, knowledge_citations = "", []
+    if use_course_kb and not course_category_id:
+        print(
+            f"[QA知识库] 已开启 useCourseKnowledgeBase 但未解析到课程分类 ID（"
+            f"请传 categoryId 或保证课件 biz_lesson.course_id 与知识库 category_id 一致），lesson_id={lesson_id}"
+        )
+    if use_course_kb and course_category_id:
+        kb_context_text, knowledge_citations = _retrieve_course_knowledge_context(
+            course_category_id, question_content
+        )
+        if not knowledge_citations:
+            print(
+                f"[QA知识库] 分类 {course_category_id} 下无可用 RAG 片段（无文档或 rag_chunks 为空/未建索引），question={question_content[:80]!r}"
+            )
 
     ai_generator = AIGenerator(provider='zhipu')
     formatted_history = _format_history(history_qa)
@@ -256,7 +379,8 @@ def qa_interact():
             context_text,
             rag_context_text,
             current_section_id=current_section_id,
-            current_page_content=current_page_content[:1200]
+            current_page_content=current_page_content[:1200],
+            kb_context_text=kb_context_text or None,
         )
 
         answer_content = ai_generator.generate_chat_reply(
@@ -336,7 +460,19 @@ def qa_interact():
         f"questionType={question_type}, syncTTS={should_sync_tts if 'should_sync_tts' in locals() else False}"
     )
     
-    return api_response(data={'answerId': answer_id, 'answerContent': answer_content, 'audioUrl': audio_url, 'understandingLevel': understanding_level, 'supplementContent': supplement_content, 'adjustedScript': adjusted_script, 'sessionId': session_id})
+    return api_response(
+        data={
+            'answerId': answer_id,
+            'answerContent': answer_content,
+            'audioUrl': audio_url,
+            'understandingLevel': understanding_level,
+            'supplementContent': supplement_content,
+            'adjustedScript': adjusted_script,
+            'sessionId': session_id,
+            'knowledgeCitations': knowledge_citations,
+            'coursewareCitations': courseware_citations,
+        }
+    )
 
 
 @qa_bp.route('/interact/stream', methods=['POST'])
@@ -357,6 +493,7 @@ def qa_interact_stream():
     current_page_content = (data.get('currentPageContent') or "").strip()
     current_section_id = data.get('currentSectionId')
     history_qa = data.get('historyQa', [])
+    use_course_kb = bool(data.get('useCourseKnowledgeBase') or data.get('useKnowledgeBase'))
 
     if not question_content:
         return api_response(code=400, msg='提问内容不能为空')
@@ -387,12 +524,27 @@ def qa_interact_stream():
             yield _sse_event("meta", {"sessionId": session_id, "answerId": answer_id})
 
             # 流式场景优先保证首包与连贯输出，不在请求链路里做重型重建/OCR
-            context_text, rag_context_text, related_knowledge = _resolve_lesson_context(
+            context_text, rag_context_text, related_knowledge, courseware_citations = _resolve_lesson_context(
                 lesson_id,
                 current_section_id,
                 question_content,
                 allow_rebuild=False
             )
+            course_category_id = _resolve_kb_category_id(data, lesson_id)
+            kb_context_text, knowledge_citations = "", []
+            if use_course_kb and not course_category_id:
+                print(
+                    f"[QA知识库-流式] 已开启知识库但未解析到课程分类 ID，lesson_id={lesson_id}"
+                )
+            if use_course_kb and course_category_id:
+                kb_context_text, knowledge_citations = _retrieve_course_knowledge_context(
+                    course_category_id, question_content
+                )
+                if not knowledge_citations:
+                    print(
+                        f"[QA知识库-流式] 分类 {course_category_id} 检索结果为空（无文档或无 rag_chunks），"
+                        f"question={question_content[:80]!r}"
+                    )
             formatted_history = _format_history(history_qa)
             ai_generator = AIGenerator(provider='zhipu')
             is_confused = any(k in question_content for k in CONFUSED_KEYWORDS)
@@ -401,7 +553,8 @@ def qa_interact_stream():
                 context_text,
                 rag_context_text,
                 current_section_id=current_section_id,
-                current_page_content=current_page_content[:1200]
+                current_page_content=current_page_content[:1200],
+                kb_context_text=kb_context_text or None,
             )
 
             ai_start = time.perf_counter()
@@ -516,7 +669,9 @@ def qa_interact_stream():
                 "understandingLevel": understanding_level,
                 "supplementContent": supplement_content,
                 "adjustedScript": adjusted_script,
-                "sessionId": session_id
+                "sessionId": session_id,
+                "knowledgeCitations": knowledge_citations,
+                "coursewareCitations": courseware_citations,
             })
         except Exception as e:
             print(f"AI Stream Error: {e}")
@@ -532,6 +687,126 @@ def qa_interact_stream():
             "Connection": "keep-alive"
         }
     )
+
+
+@qa_bp.route("/vision", methods=["POST"])
+@jwt_required()
+def qa_vision_explain():
+    """
+    课件预览中点击 Paddle 识别的配图区域：截取区域图 + 课程上下文，调用通义千问视觉作答。
+    需配置 DASHSCOPE_API_KEY；不参与 enc 签名校验（请求体含大图）。
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        image = data.get("imageBase64") or data.get("image") or ""
+        question = (data.get("questionContent") or data.get("question") or "").strip()
+        user_ctx = (data.get("contextText") or data.get("currentPageContent") or "").strip()
+        lesson_id = data.get("lessonId") or data.get("courseId")
+        current_section_id = data.get("currentSectionId")
+        page_num = data.get("pageNum")
+        file_name = (data.get("fileName") or "").strip()
+
+        if page_num is not None and current_section_id is None:
+            try:
+                current_section_id = f"sec{int(page_num)}"
+            except (TypeError, ValueError):
+                current_section_id = data.get("currentSectionId")
+        if isinstance(current_section_id, int):
+            current_section_id = f"sec{current_section_id}"
+        elif (
+            current_section_id
+            and not str(current_section_id).startswith("sec")
+            and str(current_section_id).isdigit()
+        ):
+            current_section_id = f"sec{int(current_section_id)}"
+
+        if not (image or "").strip():
+            return api_response(code=400, msg="缺少配图数据 imageBase64")
+
+        # 防止异常超大 body 拖垮内存（约 12MB base64）
+        img_len = len((image or "").strip())
+        if img_len > 12_000_000:
+            return jsonify(
+                {
+                    "code": 400,
+                    "msg": "配图数据过大，请缩小选区或刷新页面后重试",
+                    "data": {},
+                    "requestId": f"req{int(time.time())}{uuid.uuid4().hex[:6]}",
+                }
+            ), 200
+
+        server_ctx = ""
+        if lesson_id:
+            try:
+                ct, _, _, _ = _resolve_lesson_context(
+                    lesson_id,
+                    current_section_id,
+                    question or "插图内容",
+                    allow_rebuild=False,
+                )
+                server_ctx = (ct or "").strip()
+            except Exception as e:
+                print(f"[QA视觉] 加载课件上下文失败: {e}")
+
+        meta_lines = []
+        if file_name:
+            meta_lines.append(f"当前课件文件名：{file_name}")
+        if page_num is not None:
+            meta_lines.append(f"学生点击的页码：第 {page_num} 页")
+
+        parts = []
+        if meta_lines:
+            parts.append("\n".join(meta_lines))
+        if server_ctx:
+            parts.append("【本页课程文本/讲稿上下文】\n" + server_ctx[:6000])
+        if user_ctx:
+            parts.append("【当前页可见文字摘录】\n" + user_ctx[:4000])
+        full_context = "\n\n".join(parts)
+
+        default_q = (
+            "请结合上述课程上下文，说明这张插图展示了什么、关键信息是什么，"
+            "以及它与当前页知识点有什么关系。若图中有公式、图表或示意图请逐项说明。"
+        )
+        answer, err = qwen_vl_chat(image, question or default_q, full_context)
+        if err:
+            safe_err = (err or "").replace("\x00", "")
+            return (
+                jsonify(
+                    {
+                        "code": 500,
+                        "msg": safe_err,
+                        "data": {},
+                        "requestId": f"req{int(time.time())}{uuid.uuid4().hex[:6]}",
+                    }
+                ),
+                200,
+            )
+
+        safe_answer = (answer or "").replace("\x00", "")
+        return api_response(
+            data={
+                "answerContent": safe_answer,
+                "visionModel": os.environ.get("QWEN_VL_MODEL", "qwen-vl-plus"),
+            }
+        )
+    except Exception as e:
+        print(f"[QA视觉] 未处理异常: {e}")
+        import traceback
+
+        traceback.print_exc()
+        # 统一 HTTP 200 + 业务 code，避免浏览器报「500 + 红字」且前端仍可读 msg
+        return (
+            jsonify(
+                {
+                    "code": 500,
+                    "msg": f"视觉接口异常: {str(e)[:800]}",
+                    "data": {},
+                    "requestId": f"req{int(time.time())}{uuid.uuid4().hex[:6]}",
+                }
+            ),
+            200,
+        )
+
 
 # ==================== 2.2.2 语音提问识别接口 ====================
 @qa_bp.route('/voiceToText', methods=['POST'])

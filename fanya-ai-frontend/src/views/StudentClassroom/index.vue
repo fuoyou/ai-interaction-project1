@@ -137,6 +137,7 @@
               @changePage="handlePageChange" 
               @upload="showSidebarDrawer = true"
               @textSelected="handleTextSelected"
+              @imageSelected="handleImageVision"
             />
           </div>
         </div>
@@ -219,6 +220,7 @@
             :history="chatHistory" 
             :isChatLoading="isChatLoading"
             :courseId="currentCourseId"
+            :lesson-category-id="lessonCategoryId"
             @sendMessage="onSendMessage" 
             @replay="startLecture" 
             @resolve="handleResolveSupplement" 
@@ -312,7 +314,7 @@ import { ArrowLeft, ArrowDown, Upload, Document, VideoCamera, Close, TrendCharts
 // API 接口导入
 import { diagnoseRhythm, getLearningHistory } from '@/api/rhythm' 
 import { getCourseDetail, listMyStudentCourses, listTeacherCourses, uploadCourse, chatWithAI } from '@/api/course' 
-import { qaInteractStream } from '@/api/qa'
+import { qaInteractStream, qaVisionExplain } from '@/api/qa'
 import { getProgressDetail, trackProgress } from '@/api/progress' 
 import { updateUserProfile } from '@/api/user'
 
@@ -370,11 +372,22 @@ const courseList = ref([])
 const loadingCourses = ref(false)
 const searchKeyword = ref('')
 const currentCourseId = ref(null)
+/** 课程分类 ID（与「我的课程库」中课程 id 一致），用于关联知识库 RAG */
+const lessonCategoryId = ref('')
 const coursePaddlePages = ref([])
 
 /** 最近一次课件详情中的状态，用于解析进度条 */
 const lessonDetail = ref({ status: null, taskStatus: null, pageCount: 0, aiScriptLen: 0 })
 const parseErrorMessage = ref('')
+
+/** 与知识库 biz_knowledge_doc.category_id 对齐，需与上传课件/资料时选的课程分类一致 */
+const pickCategoryIdFromLessonRow = (row) => {
+  if (!row || typeof row !== 'object') return ''
+  const cid = row.courseId ?? row.course_id ?? row.categoryId ?? row.category_id
+  if (cid === undefined || cid === null) return ''
+  const s = String(cid).trim()
+  return s && s !== 'undefined' && s !== 'null' ? s : ''
+}
 
 const applyLessonDetail = (d) => {
   if (!d) return
@@ -383,6 +396,13 @@ const applyLessonDetail = (d) => {
     taskStatus: d.taskStatus,
     pageCount: d.fileInfo?.pageCount ?? 0,
     aiScriptLen: Array.isArray(d.aiScript) ? d.aiScript.length : 0
+  }
+  const cid = d.courseId ?? d.course_id ?? d.categoryId ?? d.category_id
+  if (cid !== undefined && cid !== null && String(cid).trim() !== '') {
+    lessonCategoryId.value = String(cid)
+  } else if (!lessonCategoryId.value) {
+    // 详情缺 courseId 时保留 selectCourse 从列表预填的值，避免知识库 categoryId 被误清空
+    lessonCategoryId.value = ''
   }
 }
 
@@ -721,6 +741,8 @@ const selectCourse = async (course, opts = {}) => {
   revokeStudentBlobPreview()
 
   currentCourseId.value = course.id
+  // 列表项常带 courseId；详情接口偶发延迟时先用列表值，避免知识库开关打开但 categoryId 为空
+  lessonCategoryId.value = pickCategoryIdFromLessonRow(course)
   currentFileName.value = course.courseName || ''
   loading.value = true
   showSidebarDrawer.value = false
@@ -1121,9 +1143,19 @@ const loadLearningHistory = async () => {
 }
 
 // 修改后的提问逻辑：兼容多种关键词触发降维讲解并自动播放
-const onSendMessage = async (text) => {
+const onSendMessage = async (payload) => {
+  const text = typeof payload === 'string' ? payload : (payload?.text || '')
+  const useCourseKnowledgeBase =
+    typeof payload === 'object' && payload && !!payload.useCourseKnowledgeBase
+  if (!text) return
   if (!currentCourseId.value) return ElMessage.warning('请先选择一个课件')
   if (showLessonPending.value) return ElMessage.warning('请等待课件解析完成后再提问')
+
+  if (useCourseKnowledgeBase && !String(lessonCategoryId.value || '').trim()) {
+    ElMessage.warning(
+      '当前课件未关联课程分类（courseId），无法检索知识库资料。请使用「上传到指定课程」上传课件，并保证资料上传时选择同一课程分类。'
+    )
+  }
   
   // 【新增】：检测表达“听不懂”和“要求重讲”的各类关键词
   const misunderstandKeywords = ['不明白', '不懂', '不会', '再讲一遍', '听不懂', '没听懂', '太难了', '重新讲', '没懂', '能再讲', '不理解'];
@@ -1158,7 +1190,17 @@ const onSendMessage = async (text) => {
       : text;
 
     await qaInteractStream(
-      { courseId: currentCourseId.value, lessonId: currentCourseId.value, pageNum: currentPage.value, sessionId: qaSessionId.value, question: apiQuestion, historyQa, currentPageContent: currentScript.value },
+      {
+        courseId: currentCourseId.value,
+        lessonId: currentCourseId.value,
+        pageNum: currentPage.value,
+        sessionId: qaSessionId.value,
+        question: apiQuestion,
+        historyQa,
+        currentPageContent: currentScript.value,
+        useCourseKnowledgeBase,
+        categoryId: lessonCategoryId.value || ''
+      },
       {
         onMeta: (meta) => { if (meta?.sessionId) qaSessionId.value = meta.sessionId },
         onDelta: (delta) => { chatHistory.value[aiMsgIndex].content += delta?.text || '' },
@@ -1170,6 +1212,12 @@ const onSendMessage = async (text) => {
     const data = donePayload || {}
     chatHistory.value[aiMsgIndex].streaming = false
     chatHistory.value[aiMsgIndex].audioUrl = data.audioUrl || ''
+    if (Array.isArray(data.coursewareCitations) && data.coursewareCitations.length) {
+      chatHistory.value[aiMsgIndex].coursewareCitations = data.coursewareCitations
+    }
+    if (Array.isArray(data.knowledgeCitations) && data.knowledgeCitations.length) {
+      chatHistory.value[aiMsgIndex].knowledgeCitations = data.knowledgeCitations
+    }
 
     if (data.answerContent && !chatHistory.value[aiMsgIndex].content) {
       chatHistory.value[aiMsgIndex].content = data.answerContent
@@ -1216,9 +1264,27 @@ const onSendMessage = async (text) => {
     if (lastMsg && lastMsg.role === 'ai' && lastMsg.streaming) chatHistory.value.pop()
     
     try {
-      const res = await chatWithAI({ courseId: currentCourseId.value, pageNum: currentPage.value, question: text, historyQa, currentPageContent: currentScript.value })
-      const data = res.data || res
-      chatHistory.value.push({ role: 'ai', type: 'normal', content: data.answerContent || '系统忙，请稍后再试', audioUrl: data.audioUrl })
+      const res = await chatWithAI({
+        courseId: currentCourseId.value,
+        pageNum: currentPage.value,
+        question: text,
+        historyQa,
+        currentPageContent: currentScript.value,
+        useCourseKnowledgeBase,
+        categoryId: lessonCategoryId.value || ''
+      })
+      const wrap = res.data || res
+      const data = wrap.data !== undefined ? wrap.data : wrap
+      const kc = data.knowledgeCitations
+      const cc = data.coursewareCitations
+      chatHistory.value.push({
+        role: 'ai',
+        type: 'normal',
+        content: data.answerContent || '系统忙，请稍后再试',
+        audioUrl: data.audioUrl,
+        ...(Array.isArray(cc) && cc.length ? { coursewareCitations: cc } : {}),
+        ...(Array.isArray(kc) && kc.length ? { knowledgeCitations: kc } : {})
+      })
       if (data.sessionId) qaSessionId.value = data.sessionId
     } catch {
       ElMessage.error('AI 响应异常')
@@ -1288,6 +1354,52 @@ const toggleRhythmPanel = () => {
     window.speechSynthesis.cancel()
   }
   showRhythmPanel.value = !showRhythmPanel.value
+}
+
+const handleImageVision = async ({ imageBase64, page }) => {
+  if (!currentCourseId.value) {
+    ElMessage.warning('请先选择课件')
+    return
+  }
+  if (showLessonPending.value) {
+    ElMessage.warning('请等待课件解析完成')
+    return
+  }
+  globalAudioManager.stopAll()
+  if (digitalAvatarRef.value) digitalAvatarRef.value.stopAudio()
+
+  currentMode.value = 'chat'
+  showRhythmPanel.value = false
+
+  const userLine = `（第 ${page} 页配图 · 通义千问视觉）请解读这张图，并结合当前页知识点说明含义。`
+  const startIdx = chatHistory.value.length
+  chatHistory.value.push({ role: 'user', content: userLine, sourceType: 'vision-image', sourcePage: page })
+  isChatLoading.value = true
+  const aiMsg = { role: 'ai', type: 'normal', content: '', visionModel: '' }
+  chatHistory.value.push(aiMsg)
+  const aiIdx = chatHistory.value.length - 1
+
+  try {
+    const json = await qaVisionExplain({
+      imageBase64,
+      lessonId: currentCourseId.value,
+      courseId: currentCourseId.value,
+      pageNum: page,
+      currentSectionId: `sec${page}`,
+      contextText: (currentScript.value || '').slice(0, 8000),
+      fileName: currentFileName.value || '',
+      question: ''
+    })
+    const data = json.data || {}
+    chatHistory.value[aiIdx].content = data.answerContent || '（无内容）'
+    chatHistory.value[aiIdx].visionModel = data.visionModel || ''
+    ElMessage.success('视觉解读完成')
+  } catch (e) {
+    chatHistory.value.splice(startIdx, chatHistory.value.length - startIdx)
+    ElMessage.error(e?.message || '视觉解读失败，请检查是否配置 DASHSCOPE_API_KEY')
+  } finally {
+    isChatLoading.value = false
+  }
 }
 
 const handleTextSelected = ({ text, page, isFormula }) => {
